@@ -1,0 +1,52 @@
+{
+  "name": "pi-admin-exec",
+  "version": "0.1.0",
+  "description": "Run privileged commands from any Pi session, including RPC/pi-web, by delegating authentication to the operating system's own dialog",
+  "type": "module",
+  "license": "MIT",
+  "author": "famiji",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "sudo",
+    "root",
+    "privilege-escalation",
+    "macos",
+    "pi-web"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/admin-exec.ts"
+    ]
+  },
+  "files": [
+    "extensions/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/famiji/pi-admin-exec.git"
+  },
+  "bugs": {
+    "url": "https://github.com/famiji/pi-admin-exec/issues"
+  },
+  "homepage": "https://github.com/famiji/pi-admin-exec#readme"
+}
