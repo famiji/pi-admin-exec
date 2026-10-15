@@ -1,5 +1,7 @@
 # pi-admin-exec
 
+[![test](https://github.com/famiji/pi-admin-exec/actions/workflows/test.yml/badge.svg)](https://github.com/famiji/pi-admin-exec/actions/workflows/test.yml)
+
 **Run privileged commands from any Pi session, including the non-interactive ones.**
 
 Pi's existing sudo extensions need an interactive terminal, because that is where
