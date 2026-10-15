@@ -68,3 +68,40 @@ export function macosElevationScript(scriptPath) {
 export function isUserCancel(stderr) {
 	return /\(-128\)/.test(stderr ?? "") || /User cancel/i.test(stderr ?? "");
 }
+
+// --- audit trail -------------------------------------------------------------
+
+/**
+ * One line per attempt, so a root command is never invisible after the fact.
+ * Written as JSON Lines and rendered by formatAuditEntry.
+ *
+ * `outcome` is one of: ran | declined | cancelled | error. Declined and
+ * cancelled attempts are recorded too — knowing what was *tried* is the point.
+ */
+export function auditRecord(command, reason, outcome, { exitCode = null, durationMs = null, ts = new Date().toISOString() } = {}) {
+	return { ts, command, reason, outcome, exitCode, durationMs };
+}
+
+/** Render one audit entry as the two-line block `/admin` prints. */
+export function formatAuditEntry(entry) {
+	const status = entry.outcome === "ran" ? `exit ${entry.exitCode ?? "?"}` : entry.outcome;
+	const seconds = typeof entry.durationMs === "number" ? ` ${(entry.durationMs / 1000).toFixed(1)}s` : "";
+	const reason = entry.reason ? `\n    ${entry.reason}` : "";
+	return `${entry.ts}  ${status}${seconds}  ${entry.command}${reason}`;
+}
+
+/** Parse a JSON Lines audit log and return the newest `limit` entries. */
+export function parseAuditLog(text, limit = 10) {
+	const entries = [];
+	for (const line of (text ?? "").split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			const parsed = JSON.parse(trimmed);
+			if (parsed && typeof parsed.command === "string") entries.push(parsed);
+		} catch {
+			// A half-written final line (killed mid-append) is not worth failing over.
+		}
+	}
+	return entries.slice(-limit);
+}

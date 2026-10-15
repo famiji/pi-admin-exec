@@ -8,22 +8,27 @@
  * this process, its argv, its environment, or the model's context.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import {
+	auditRecord,
 	buildWrapper,
+	formatAuditEntry,
 	isUserCancel,
 	macosElevationScript,
+	parseAuditLog,
 	parseResult,
 } from "../src/elevate.mjs";
 
 const OSASTATEMENT = "/usr/bin/osascript";
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
+const AUDIT_LOG = join(homedir(), ".pi", "agent", "admin-exec.log");
+const AUDIT_TAIL = 10;
 
 export default function (pi: ExtensionAPI) {
 	pi.registerTool(
@@ -56,17 +61,21 @@ export default function (pi: ExtensionAPI) {
 			}),
 
 			async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-				if (!(await confirm(pi, ctx, params.command, params.reason))) {
+				const { command, reason } = params;
+
+				if (!(await confirm(ctx, command, reason))) {
+					record(command, reason, "declined");
 					return {
 						content: [{ type: "text", text: "User declined; nothing ran." }],
-						details: { declined: true },
+						details: { declined: true, command },
 					};
 				}
 
+				const startedAt = Date.now();
 				const dir = mkdtempSync(join(tmpdir(), "pi-admin-"));
 				const scriptPath = join(dir, "run.sh");
 				try {
-					writeFileSync(scriptPath, buildWrapper(params.command), { mode: 0o700 });
+					writeFileSync(scriptPath, buildWrapper(command), { mode: 0o700 });
 
 					let result;
 					try {
@@ -75,25 +84,34 @@ export default function (pi: ExtensionAPI) {
 							signal,
 						});
 					} catch (error) {
-						return toolError(`Could not start ${OSASTATEMENT}: ${describe(error)}`);
+						const message = `Could not start ${OSASTATEMENT}: ${describe(error)}`;
+						record(command, reason, "error");
+						return toolError(message, command);
 					}
 
+					const durationMs = Date.now() - startedAt;
+
 					if (isUserCancel(result.stderr)) {
+						record(command, reason, "cancelled", { durationMs });
 						return {
 							content: [{ type: "text", text: "Authentication was cancelled." }],
-							details: { cancelled: true },
+							details: { cancelled: true, command },
 						};
 					}
 
 					const { output, exitCode } = parseResult(result.stdout ?? "");
 					if (exitCode === null && result.stderr) {
+						record(command, reason, "error", { durationMs });
 						return toolError(
 							`osascript refused the request: ${result.stderr.trim()}`,
+							command,
 							result.stderr,
 						);
 					}
 
+					// The command leads the result so the transcript says what ran, not just what it printed.
 					const text = [
+						`$ ${command}`,
 						output || "(no output)",
 						`exit code: ${exitCode ?? "unknown"}`,
 						result.killed ? "killed: timed out or aborted" : "",
@@ -101,9 +119,18 @@ export default function (pi: ExtensionAPI) {
 						.filter(Boolean)
 						.join("\n");
 
+					record(command, reason, "ran", { exitCode, durationMs });
+
 					return {
 						content: [{ type: "text", text }],
-						details: { exitCode, output, stderr: result.stderr, killed: result.killed },
+						details: {
+							command,
+							exitCode,
+							output,
+							stderr: result.stderr,
+							killed: result.killed,
+							durationMs,
+						},
 						...(exitCode !== 0 ? { isError: true } : {}),
 					};
 				} finally {
@@ -112,6 +139,18 @@ export default function (pi: ExtensionAPI) {
 			},
 		}),
 	);
+
+	pi.registerCommand("admin", {
+		description: "Show the privileged commands admin_exec was asked to run",
+		handler: async (args, ctx) => {
+			const requested = Number.parseInt((args ?? "").trim(), 10);
+			const limit = Number.isInteger(requested) && requested > 0 ? requested : AUDIT_TAIL;
+			const text = readAuditLog(limit);
+			if (typeof ctx?.ui?.notify === "function") ctx.ui.notify(text, "info");
+			else process.stderr.write(`${text}\n`);
+			return {};
+		},
+	});
 }
 
 /**
@@ -120,7 +159,7 @@ export default function (pi: ExtensionAPI) {
  * instead — the system password prompt is still the gate, but the command
  * should never be invisible to whoever is watching the terminal.
  */
-async function confirm(pi, ctx, command, reason) {
+async function confirm(ctx, command, reason) {
 	if (typeof ctx?.ui?.confirm === "function") {
 		return await ctx.ui.confirm(`Run as root?\n\n${command}`, reason);
 	}
@@ -128,14 +167,36 @@ async function confirm(pi, ctx, command, reason) {
 	return true;
 }
 
+/** Append one audit line. A logging failure must never fail the command. */
+function record(command, reason, outcome, extra) {
+	try {
+		appendFileSync(AUDIT_LOG, `${JSON.stringify(auditRecord(command, reason, outcome, extra))}\n`, {
+			mode: 0o600,
+		});
+	} catch (error) {
+		process.stderr.write(`[pi-admin-exec] could not write ${AUDIT_LOG}: ${describe(error)}\n`);
+	}
+}
+
+function readAuditLog(limit) {
+	if (!existsSync(AUDIT_LOG)) return `No privileged commands recorded yet (${AUDIT_LOG}).`;
+	const entries = parseAuditLog(readFileSync(AUDIT_LOG, "utf8"), limit);
+	if (entries.length === 0) return `No privileged commands recorded yet (${AUDIT_LOG}).`;
+	return [
+		`Last ${entries.length} privileged command${entries.length === 1 ? "" : "s"} (${AUDIT_LOG}):`,
+		"",
+		...entries.map(formatAuditEntry),
+	].join("\n");
+}
+
 function describe(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function toolError(text, stderr) {
+function toolError(text, command, stderr) {
 	return {
 		content: [{ type: "text", text }],
-		details: { error: text, stderr },
+		details: { error: text, command, stderr },
 		isError: true,
 	};
 }

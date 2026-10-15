@@ -26,7 +26,7 @@ type.
    (`mkdtemp`, mode `0700`).
 4. macOS asks for administrator credentials in its own SecurityAgent window.
 5. The command's merged stdout/stderr and its exit code come back as the tool
-   result.
+   result, and the attempt is appended to the audit log.
 
 The password is typed into the system dialog. It never passes through Pi, this
 extension, `argv`, the environment, or the model's context. That is a stronger
@@ -60,6 +60,27 @@ Requires Pi and Node.js ≥ 22.19.0. macOS only, for now.
   to state why root is needed, in front of the user, before anything happens.
 - `timeoutMs` defaults to 15 minutes. The temporary script is removed when the
   call finishes.
+
+### Audit trail
+
+Every call appends one JSON line to `~/.pi/agent/admin-exec.log` (mode `0600`) —
+what ran, why, and how it ended:
+
+```json
+{"ts":"2026-10-16T09:12:04.881Z","command":"id -u","reason":"check the uid","outcome":"ran","exitCode":0,"durationMs":1180}
+```
+
+`outcome` is `ran`, `declined`, `cancelled`, or `error`. **Declined and cancelled
+attempts are recorded too** — knowing what was *tried* is the point of a log
+like this, not only what succeeded.
+
+```
+/admin       last 10 entries
+/admin 50    last 50 entries
+```
+
+A logging failure never fails the command; it goes to stderr and the command
+still runs.
 
 ## Security model
 
@@ -142,8 +163,8 @@ reporting, stderr merging, marker stripping, and AppleScript path escaping
 without needing administrator credentials.
 
 ```
-extensions/admin-exec.ts   the tool: confirm, elevate, parse, report
-src/elevate.mjs            wrapper + macOS backend (the porting seam)
+extensions/admin-exec.ts   the tool: confirm, elevate, parse, report; the /admin command
+src/elevate.mjs            wrapper + macOS backend (the porting seam) + audit formatting
 test/admin-exec.test.mjs
 ```
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 — 2026-10-16
+
+- `admin_exec` now writes an audit trail to `~/.pi/agent/admin-exec.log`
+  (JSON Lines, mode `0600`): command, reason, outcome, exit code, duration.
+  Declined and cancelled attempts are recorded too.
+- New `/admin` command renders the most recent entries, `/admin 50` for more.
+- The command now leads the tool result, so a transcript says what ran and not
+  only what it printed.
+
 ## 0.1.0 — 2026-10-16
 
 Initial release.

@@ -8,10 +8,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import {
+	auditRecord,
 	buildWrapper,
 	EXIT_MARKER,
+	formatAuditEntry,
 	isUserCancel,
 	macosElevationScript,
+	parseAuditLog,
 	parseResult,
 } from "../src/elevate.mjs";
 
@@ -82,3 +85,49 @@ test("recognizes a cancelled dialog in any language", () => {
 	assert.equal(isUserCancel("execution error: 用户已取消。(-128)"), true);
 	assert.equal(isUserCancel(""), false);
 });
+
+test("an audit record carries the command, the reason and the outcome", () => {
+	assert.deepEqual(
+		auditRecord("rm -rf /tmp/x", "clean up", "ran", { exitCode: 0, durationMs: 1500, ts: "T" }),
+		{ ts: "T", command: "rm -rf /tmp/x", reason: "clean up", outcome: "ran", exitCode: 0, durationMs: 1500 },
+	);
+});
+
+test("a declined attempt is recorded too", () => {
+	// Knowing what was tried is the point of the log.
+	assert.equal(auditRecord("id", "check", "declined").outcome, "declined");
+});
+
+test("formats a run with its exit code, duration and reason", () => {
+	assert.equal(
+		formatAuditEntry(auditRecord("id -u", "check", "ran", { exitCode: 0, durationMs: 1200, ts: "T" })),
+		"T  exit 0 1.2s  id -u\n    check",
+	);
+});
+
+test("formats a non-run outcome without a duration", () => {
+	assert.equal(
+		formatAuditEntry(auditRecord("id -u", "", "cancelled", { ts: "T" })),
+		"T  cancelled  id -u",
+	);
+});
+
+test("reads back only the newest entries", () => {
+	const log = ["a", "b", "c"]
+		.map((command) => JSON.stringify(auditRecord(command, "", "ran", { exitCode: 0 })))
+		.join("\n");
+	assert.deepEqual(
+		parseAuditLog(log, 2).map((entry) => entry.command),
+		["b", "c"],
+	);
+});
+
+test("skips blank and half-written lines instead of failing", () => {
+	const good = JSON.stringify(auditRecord("id", "", "ran", { exitCode: 0 }));
+	assert.deepEqual(
+		parseAuditLog(`\n${good}\n{"ts":"T","comm`, 5).map((entry) => entry.command),
+		["id"],
+	);
+});
+
+// --- end of audit cases
