@@ -89,10 +89,11 @@ test("passes a here-doc through untouched", () => {
 });
 
 test("reports the shell's own failure when the command has a syntax error", () => {
-	// This used to arrive as "osascript refused the request".
+	// This used to arrive as "osascript refused the request". The wording is the
+	// shell's, so it differs per /bin/sh; what matters is that it names cmd.sh.
 	const result = run('echo "unterminated');
 	assert.equal(result.exitCode, 2);
-	assert.match(result.output, /unexpected EOF while looking for matching/);
+	assert.match(result.output, /cmd\.sh: \d+: .*[Qq]uoted string|unexpected EOF/);
 });
 
 test("an empty command succeeds and prints nothing", () => {
