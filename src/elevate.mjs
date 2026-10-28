@@ -1,44 +1,78 @@
 // Elevation plumbing for pi-admin-exec.
 //
-// Platform-independent part: buildWrapper / parseResult. A new platform backend
-// replaces only the macOS section at the bottom and reuses both.
-
-export const EXIT_MARKER = "__PI_ADMIN_EXIT__";
+// Platform-independent part: buildDriver. A new platform backend replaces only
+// the macOS section below and reuses it.
 
 /**
- * Wrap a command so `/bin/sh <file>` always exits 0 and reports the real status
- * on stdout.
+ * Build the script that runs as root.
  *
- * Why the indirection: `do shell script` raises an AppleScript error on a
- * non-zero exit and its output is lost, so the wrapper has to swallow the
- * status itself and hand it back as data.
+ * It runs `<dir>/cmd.sh` — the user's command, written verbatim, so no shell or
+ * AppleScript escaping can mangle it — and leaves files next to it: `out`
+ * (merged stdout/stderr), `exit` (the raw status) and `stopped` (why the
+ * command was cut short: `deadline`, `parent`, or absent when it finished).
  *
- * The command runs in a subshell for the same reason: a bare `exit` in the
- * command would otherwise end the script before the marker is printed.
+ * Why a driver at all, instead of one shell string:
+ *
+ * - The status travels out of band, in `exit`. Printing it on stdout would let a
+ *   command print the same line, and a truncated read would lose it.
+ * - The command runs as a background job so the watchdog can reach its whole
+ *   process tree. Killing `osascript` alone leaves that tree running as root —
+ *   which is what used to happen on every timeout.
+ * - The deadline is enforced *here*, not by the parent, so it also fires when
+ *   the parent is gone: Pi's abort (and any crash of Pi) SIGTERMs `osascript`,
+ *   which orphans this script but does not stop it. Polling for the original
+ *   parent closes that hole.
  */
-export function buildWrapper(command) {
+export function buildDriver(dir, { timeoutSeconds = 900 } = {}) {
+	const quoted = dir.replace(/'/g, "'\\''");
 	return [
 		"#!/bin/sh",
-		"(",
-		command,
-		") 2>&1",
-		"__pi_admin_rc=$?",
-		`printf '\\n${EXIT_MARKER}%s\\n' "$__pi_admin_rc"`,
+		`__pi_dir='${quoted}'`,
+		"",
+		"# Stop a process and everything below it. Depth is bounded by the real tree.",
+		"# shortcut: one pgrep pass per level; a process that forks during the walk",
+		"# survives until the deadline backstop.",
+		"kill_tree() {",
+		'\tfor c in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$c" "$2"; done',
+		'\tkill -"$2" "$1" 2>/dev/null',
+		"}",
+		"",
+		"# Merged into one file so stdout and stderr keep their relative order.",
+		'/bin/sh "$__pi_dir/cmd.sh" > "$__pi_dir/out" 2>&1 &',
+		"__pi_pid=$!",
+		"__pi_parent=$PPID",
+		`__pi_budget=${timeoutSeconds}`,
+		"",
+		"# Two reasons to stop the command: the deadline, or Pi going away (polled, so a",
+		"# reused pid delays it to the deadline at worst; pid 1 means nobody is left).",
+		'\t( __pi_why=deadline',
+		'\t  while [ "$__pi_budget" -gt 0 ]; do',
+		'\t\tif [ "$__pi_parent" -le 1 ] || ! kill -0 "$__pi_parent" 2>/dev/null; then',
+		'\t\t\t__pi_why=parent',
+		'\t\t\tbreak',
+		'\t\tfi',
+		"\t\tsleep 1",
+		'\t\t__pi_budget=$((__pi_budget - 1))',
+		"\t  done",
+		'\t  printf \'%s\\n\' "$__pi_why" > "$__pi_dir/stopped"',
+		'\t  kill_tree "$__pi_pid" TERM',
+		"\t  __pi_n=0",
+		'\t  while kill -0 "$__pi_pid" 2>/dev/null && [ "$__pi_n" -lt 5 ]; do',
+		"\t\tsleep 1",
+		'\t\t__pi_n=$((__pi_n + 1))',
+		"\t  done",
+		'\t  kill_tree "$__pi_pid" KILL',
+		"\t) &",
+		"__pi_wd=$!",
+		"",
+		'{ wait "$__pi_pid"; } 2>/dev/null',
+		"__pi_rc=$?",
+		'kill_tree "$__pi_wd" KILL',
+		"",
+		'printf \'%s\\n\' "$__pi_rc" > "$__pi_dir/exit"',
 		"exit 0",
 		"",
 	].join("\n");
-}
-
-/** Split a completed wrapper run into `{ output, exitCode }`. */
-export function parseResult(raw) {
-	const idx = raw.lastIndexOf(EXIT_MARKER);
-	if (idx === -1) return { output: raw.replace(/\n+$/, ""), exitCode: null };
-	const match = /^__PI_ADMIN_EXIT__(-?\d+)/.exec(raw.slice(idx));
-	return {
-		// The slice drops the marker and the blank separator line printf writes before it.
-		output: raw.slice(0, idx).replace(/\n+$/, ""),
-		exitCode: match ? Number(match[1]) : null,
-	};
 }
 
 // --- macOS backend -----------------------------------------------------------

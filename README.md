@@ -22,11 +22,16 @@ type.
    confirmation dialog (`ctx.ui.confirm`, which works in the TUI *and* in
    RPC/pi-web).
 2. Declining runs nothing, and no credential prompt appears.
-3. On approval the command is written to a private temporary directory
-   (`mkdtemp`, mode `0700`).
+3. On approval the command is written **verbatim** to a file in a private
+   temporary directory (`mkdtemp`, mode `0700`), together with a small `/bin/sh`
+   driver. Nothing is interpolated into a shell string, so quoting, here-docs and
+   `$` reach the command exactly as written, and a syntax error is reported as the
+   shell's own error instead of as a failure of the elevation step.
 4. macOS asks for administrator credentials in its own SecurityAgent window.
-5. The command's merged stdout/stderr and its exit code come back as the tool
-   result, and the attempt is appended to the audit log.
+5. The driver runs the command as root and leaves three files behind: the merged
+   output, the exit status, and a marker if it had to stop the command. The tool
+   reads them back as the result.
+6. The attempt is appended to the audit log.
 
 The password is typed into the system dialog. It never passes through Pi, this
 extension, `argv`, the environment, or the model's context. That is a stronger
@@ -35,13 +40,32 @@ there is no credential for the extension to hold.
 
 ## Install
 
+This package is not on npm. Install it straight from GitHub:
+
 ```bash
-pi install npm:pi-admin-exec
+pi install git:github.com/famiji/pi-admin-exec
+```
+
+Pin a release instead of following the default branch:
+
+```bash
+pi install git:github.com/famiji/pi-admin-exec@v0.2.1
+```
+
+A full URL or a local clone works as well — `pi install
+https://github.com/famiji/pi-admin-exec`, or `pi install ./pi-admin-exec` if you
+want to edit it. To try it once without installing anything:
+
+```bash
+pi -e git:github.com/famiji/pi-admin-exec
 ```
 
 Requires Pi and Node.js ≥ 22.19.0. macOS only, for now.
 
-`/reload` picks the extension up in a running session.
+`/reload` picks the extension up in a running session. `pi list` shows what is
+installed, `pi update --extensions` pulls newer commits, and `pi remove
+git:github.com/famiji/pi-admin-exec` drops it again. Add `-l` to any of these to
+write to the project's `.pi/settings.json` instead of your user settings.
 
 ## Usage
 
@@ -58,8 +82,11 @@ Requires Pi and Node.js ≥ 22.19.0. macOS only, for now.
   authenticates once per call, and every call is a separate prompt.
 - `reason` is required. It is the point of the confirmation step: the model has
   to state why root is needed, in front of the user, before anything happens.
-- `timeoutMs` defaults to 15 minutes. The temporary script is removed when the
-  call finishes.
+- `timeoutMs` defaults to 15 minutes. When it expires the whole process tree is
+  stopped, not just the elevation helper — a root process the command started
+  does not outlive the call. The same holds when the session is aborted or Pi
+  exits: the driver notices its caller is gone and stops itself. The temporary
+  directory is removed when the call finishes.
 
 ### Audit trail
 
@@ -93,9 +120,12 @@ still runs.
   `argv`, the environment, logs, or the model's context.
 - **Privileged work happens in a private temporary directory**, created with
   `mkdtemp` and mode `0700`, and is deleted in a `finally` block.
-- **The exit code survives a failing command.** The wrapper runs your command in
-  a subshell, captures `$?`, and reports it as data, so a non-zero exit is a
-  normal tool result rather than a lost error.
+- **The exit code is data, not an error condition.** The driver writes the status
+  to a file instead of printing it, so a failing command is a normal tool result
+  and a command cannot forge its own status by printing something.
+- **A timeout is a real timeout.** The driver kills the process tree it started,
+  counts down on its own clock, and leaves a marker so the result says the
+  command was stopped rather than failed.
 
 ### What it does not guarantee
 
@@ -141,9 +171,8 @@ this package fills.
 
 Two things worth knowing before porting:
 
-- The platform-independent half — `buildWrapper` and `parseResult` in
-  `src/elevate.mjs` — is reused as-is. A backend only supplies the elevation
-  command and the cancel detection.
+- The platform-independent half — `buildDriver` in `src/elevate.mjs` — is reused
+  as-is. A backend only supplies the elevation command and the cancel detection.
 - **Do not pretend the platforms are equivalent.** On macOS, and on Linux with
   polkit, the user types a password. **Windows UAC is a consent dialog**: an
   administrator clicks *Yes* without typing anything. Microsoft's own `sudo.exe`
@@ -158,13 +187,13 @@ Two things worth knowing before porting:
 npm test   # node --test — no root, no dialogs
 ```
 
-The suite runs the wrapper under plain `/bin/sh`, so it covers exit-code
-reporting, stderr merging, marker stripping, and AppleScript path escaping
-without needing administrator credentials.
+The suite runs the driver under plain `/bin/sh`, so it covers the exit status,
+stderr merging, verbatim quoting, the deadline and its kill of the whole tree,
+and AppleScript path escaping — no root, no dialogs.
 
 ```
-extensions/admin-exec.ts   the tool: confirm, elevate, parse, report; the /admin command
-src/elevate.mjs            wrapper + macOS backend (the porting seam) + audit formatting
+extensions/admin-exec.ts   the tool: confirm, elevate, report; the /admin command
+src/elevate.mjs            driver + macOS backend (the porting seam) + audit formatting
 test/admin-exec.test.mjs
 ```
 

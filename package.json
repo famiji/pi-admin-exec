@@ -1,6 +1,6 @@
 {
   "name": "pi-admin-exec",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Run privileged commands from any Pi session, including RPC/pi-web, by delegating authentication to the operating system's own dialog",
   "type": "module",
   "license": "MIT",

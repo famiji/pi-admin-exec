@@ -17,16 +17,18 @@ import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import {
 	auditRecord,
-	buildWrapper,
+	buildDriver,
 	formatAuditEntry,
 	isUserCancel,
 	macosElevationScript,
 	parseAuditLog,
-	parseResult,
 } from "../src/elevate.mjs";
 
-const OSASTATEMENT = "/usr/bin/osascript";
+const OSASCRIPT = "/usr/bin/osascript";
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
+/** Extra time the parent allows the driver over its own deadline. */
+const PARENT_GRACE_MS = 10_000;
+const MAX_OUTPUT_BYTES = 200_000;
 const AUDIT_LOG = join(homedir(), ".pi", "agent", "admin-exec.log");
 const AUDIT_TAIL = 10;
 
@@ -71,22 +73,32 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 
+				const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 				const startedAt = Date.now();
 				const dir = mkdtempSync(join(tmpdir(), "pi-admin-"));
-				const scriptPath = join(dir, "run.sh");
+				const driverPath = join(dir, "driver.sh");
+				const exitPath = join(dir, "exit");
+				const outPath = join(dir, "out");
+				const stoppedPath = join(dir, "stopped");
 				try {
-					writeFileSync(scriptPath, buildWrapper(command), { mode: 0o700 });
+					// The command is written verbatim: shell-level syntax it rejects is
+					// reported as its own failure, not as the dialog refusing to open.
+					writeFileSync(join(dir, "cmd.sh"), `${command}\n`, { mode: 0o600 });
+					writeFileSync(
+						driverPath,
+						buildDriver(dir, { timeoutSeconds: Math.max(1, Math.ceil(timeoutMs / 1000)) }),
+						{ mode: 0o700 },
+					);
 
 					let result;
 					try {
-						result = await pi.exec(OSASTATEMENT, ["-e", macosElevationScript(scriptPath)], {
-							timeout: params.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+						result = await pi.exec(OSASCRIPT, ["-e", macosElevationScript(driverPath)], {
+							timeout: timeoutMs + PARENT_GRACE_MS,
 							signal,
 						});
 					} catch (error) {
-						const message = `Could not start ${OSASTATEMENT}: ${describe(error)}`;
-						record(command, reason, "error");
-						return toolError(message, command);
+						record(command, reason, "error", { durationMs: Date.now() - startedAt });
+						return toolError(`Could not start ${OSASCRIPT}: ${describe(error)}`, command);
 					}
 
 					const durationMs = Date.now() - startedAt;
@@ -99,22 +111,39 @@ export default function (pi: ExtensionAPI) {
 						};
 					}
 
-					const { output, exitCode } = parseResult(result.stdout ?? "");
-					if (exitCode === null && result.stderr) {
+					if (!existsSync(exitPath)) {
 						record(command, reason, "error", { durationMs });
 						return toolError(
-							`osascript refused the request: ${result.stderr.trim()}`,
+							[
+								result.killed
+									? "The command was interrupted before it finished, so its exit status is unknown."
+									: "The command finished without recording an exit status.",
+								result.stderr.trim(),
+							]
+								.filter(Boolean)
+								.join("\n"),
 							command,
 							result.stderr,
 						);
 					}
 
+					const exitCode = Number.parseInt(readFileSync(exitPath, "utf8").trim(), 10);
+					const full = readFileSync(outPath, "utf8");
+					const truncated = Buffer.byteLength(full) > MAX_OUTPUT_BYTES;
+					// Capped here rather than in the driver: a child `head` closing the pipe
+					// makes sh report "Terminated" into the output it was truncating.
+					const output = (truncated ? full.slice(0, MAX_OUTPUT_BYTES) : full).replace(/\n+$/, "");
+					const stopped = existsSync(stoppedPath) ? readFileSync(stoppedPath, "utf8").trim() : "";
+
 					// The command leads the result so the transcript says what ran, not just what it printed.
 					const text = [
 						`$ ${command}`,
 						output || "(no output)",
-						`exit code: ${exitCode ?? "unknown"}`,
-						result.killed ? "killed: timed out or aborted" : "",
+						truncated ? `(output truncated at ${MAX_OUTPUT_BYTES} bytes)` : "",
+						`exit code: ${Number.isNaN(exitCode) ? "unknown" : exitCode}`,
+						stopped === "deadline" ? `stopped after ${timeoutMs}ms by the deadline` : "",
+						stopped === "parent" ? "stopped: the session that started it went away" : "",
+						!stopped && result.killed ? "interrupted before the command finished" : "",
 					]
 						.filter(Boolean)
 						.join("\n");
@@ -127,8 +156,9 @@ export default function (pi: ExtensionAPI) {
 							command,
 							exitCode,
 							output,
+							truncated,
+							stopped,
 							stderr: result.stderr,
-							killed: result.killed,
 							durationMs,
 						},
 						...(exitCode !== 0 ? { isError: true } : {}),

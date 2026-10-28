@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.1 — 2026-10-28
+
+Fixes for the failure modes found while auditing timeouts and error reporting.
+
+- **A timeout now stops the command, not just the dialog.** The old wrapper was
+  killed together with `osascript`, which left the root command — and anything it
+  had started — running. A driver script now owns the deadline, kills the whole
+  process tree, and records that it did, so a timeout is reported as a timeout.
+- **An abandoned call stops itself.** If Pi aborts the call or exits, the driver
+  notices its parent is gone and stops the command instead of running on as root
+  until the deadline.
+- **The exit status travels out of band.** It is written to a file rather than
+  printed, so a command that prints the marker can no longer forge its own status
+  and a truncated output cannot lose it.
+- **The command is written verbatim.** It is no longer interpolated into a shell
+  string, so quoting and here-docs reach the shell unchanged, and a syntax error
+  is reported as the shell's own failure instead of as "osascript refused the
+  request".
+- **Output is capped by the caller** at 200 000 bytes, and the result says when it
+  was truncated.
+- The README installs from GitHub; the package is not published to npm.
+
 ## 0.2.0 — 2026-10-16
 
 - `admin_exec` now writes an audit trail to `~/.pi/agent/admin-exec.log`
